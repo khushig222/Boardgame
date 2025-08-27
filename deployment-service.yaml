@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: boardgame
-          image: 599626541588.dkr.ecr.ap-south-1.amazonaws.com/workshop/demo:latest # <-- update if using ECR
+          image: 293676968103.dkr.ecr.us-east-1.amazonaws.com/boardgame:latest # <-- update if using ECR
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
