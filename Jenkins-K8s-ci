@@ -1,0 +1,130 @@
+pipeline {
+    agent any
+ 
+    tools {
+        jdk "JDK21"
+        maven "maven"
+    }
+ 
+    environment {
+        SONARQUBE = 'MySonarServer'
+        MAVEN_SETTINGS = 'settings-nexus.xml'
+        IMAGE_NAME = 'boardgame:latest'
+        AWS_REGION = 'us-east-1'     
+    }
+ 
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/khushig222.git'
+            }
+        }
+ 
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONARQUBE}") {
+                    sh '''
+                    mvn sonar:sonar -Dsonar.projectKey=my-app
+                    '''
+                }
+            }
+        }
+ 
+        stage("Quality Gate") {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'mvn clean package'
+            }
+        }
+
+        stage('Deploy Artifacts to Nexus') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'nexus-credentials',
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASS'
+                )]) {
+                    // Write temporary settings.xml with credentials
+                    writeFile file: "${MAVEN_SETTINGS}", text: """
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                                  xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+https://maven.apache.org/xsd/settings-1.0.0.xsd">
+<servers>
+<server>
+<id>maven-releases</id>
+<username>${NEXUS_USER}</username>
+<password>${NEXUS_PASS}</password>
+</server>
+<server>
+<id>maven-snapshots</id>
+<username>${NEXUS_USER}</username>
+<password>${NEXUS_PASS}</password>
+</server>
+</servers>
+</settings>
+                    """
+                    // Deploy using the custom settings
+                    sh "mvn deploy --settings ${MAVEN_SETTINGS}"
+                }
+            }
+        }   
+
+        stage('Install Docker') {
+            steps {
+                sh '''
+                curl -fsSL https://get.docker.com -o get-docker.sh
+                sh get-docker.sh
+                sudo usermod -aG docker $USER
+                '''
+            }
+        }
+
+        stage("Build Docker image") {
+            steps {
+                sh '''
+                sudo docker build -t $IMAGE_NAME .
+                '''
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                script {
+                    // Install Trivy if not already available
+                    sh '''
+                    sudo apt-get install wget gnupg
+sudo wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+sudo echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+sudo apt-get update
+sudo apt-get install trivy
+trivy image --format table --ignore-unfixed ${IMAGE_NAME}
+                    '''
+                }
+            }
+        }
+
+        stage('Push Image to ECR') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'ACCOUNTID', variable: 'ACCOUNTID')]) {
+                        sh '''
+                        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ACCOUNTID.dkr.ecr.us-east-1.amazonaws.com
+                        docker build -t boardgame .
+                        docker tag boardgame:latest $ACCOUNTID.dkr.ecr.us-east-1.amazonaws.com/boardgame:latest
+                        docker push $ACCOUNTID.dkr.ecr.us-east-1.amazonaws.com/boardgame:latest
+                        '''
+                    }
+                }
+            }
+        }
+    }
+}
